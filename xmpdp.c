@@ -1,4 +1,5 @@
 #include <libmpd/libmpd.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +20,17 @@
 #define ESC    9
 #define SPACE 65
 
+typedef struct {
+   xcb_connection_t     *conn;
+   xcb_screen_t       *screen;
+   xcb_window_t           win;
+   MpdObj                 *mo;
+   int                     x1;
+   int                     y1;
+   char                 *host;
+   int                   port;
+} xmpd_t;
+
 /* Verbose output */
 static bool verb = true;
 /* Just do a dump of available song informations */
@@ -31,7 +43,6 @@ static void xconnect (xcb_connection_t **,
                       xcb_window_t *,
                       xcb_screen_iterator_t *,
                       xcb_screen_t **,
-                      xcb_gcontext_t *,
                       uint32_t *,
                       int *,
                       int, int,
@@ -55,6 +66,16 @@ static void draw_text (xcb_connection_t *,
 static void test_cookie (xcb_void_cookie_t,
                          xcb_connection_t *,
                          char *err);
+#if 0
+static void *update_text (xcb_connection_t *,
+                          xcb_screen_t *,
+                          xcb_window_t,
+                          int, int,
+                          MpdObj *,
+                          char *,
+                          int);
+#endif
+static void *update_text (void *);
 
 static void
 mconnect (MpdObj **mo, char *host, int port) {
@@ -75,7 +96,6 @@ xconnect (xcb_connection_t ** conn,
           xcb_drawable_t            *win,
           xcb_screen_iterator_t    *iter,
           xcb_screen_t          **screen,
-          xcb_gcontext_t             *fg,
           uint32_t                 *mask,
           int                *screen_num,
           int x, int y,
@@ -226,9 +246,33 @@ void test_cookie (xcb_void_cookie_t  cookie,
    }
 }
 
+static void *update_text (void *xmpd) {
+   while (true) {
+      const xmpd_t *x = (xmpd_t *) xmpd;
+      MpdObj *mo = x->mo;
+      mpd_Song *song = xmalloc (sizeof (mpd_Song *));
+      char *label = NULL;
+      mconnect (&mo, x->host, x->port);
+      song = mpd_playlist_get_current_song (mo);
+      label = xmalloc (strlen (song->file) + 1);
+      label = song->file;
+
+      draw_text (x->conn, x->screen, x->win, x->x1, x->y1, label);
+      if (dump)
+         textdump (mpd_playlist_get_current_song (mo));
+      sleep (3);
+   }
+   return NULL;
+}
+
 
 int
 main (void) {
+   /* Thread to update context of the text field */
+   pthread_t tupdate;
+   /* Structure for the thread */
+   xmpd_t foo;
+
    /* mpd's related varibles */
    const int port = DEF_PORT;
    char *host = DEF_HOST;
@@ -241,7 +285,6 @@ main (void) {
    xcb_screen_iterator_t iter;
    xcb_screen_t *screen;
    xcb_drawable_t win;
-   xcb_gcontext_t fg;
    xcb_generic_event_t *ev;
    uint32_t mask = XCB_GC_FOREGROUND | XCB_GC_GRAPHICS_EXPOSURES;
    int screen_num;
@@ -251,7 +294,6 @@ main (void) {
          &win,
          &iter,
          &screen,
-         &fg,
          &mask,
          &screen_num,
          0, 0, 150, 150, 10);
@@ -260,6 +302,18 @@ main (void) {
    song = xmalloc (sizeof (mpd_Song *));
    if (mpd_player_get_state (mo) == MPD_PLAYER_PLAY)
       song = mpd_playlist_get_current_song (mo);
+
+   foo.conn = conn;
+   foo.screen = screen;
+   foo.win = win;
+   foo.mo = mo;
+   foo.x1 = 10;
+   foo.y1 = HEIGHT - 10;
+   foo.host = host;
+   foo.port = port;
+
+   pthread_create (&tupdate, NULL, update_text, &foo);
+   pthread_join (tupdate, NULL);
 
    while (xcb_connection_has_error (conn) == 0) {
       if ((ev = xcb_poll_for_event (conn)) != NULL) {
@@ -288,13 +342,14 @@ main (void) {
                         }
                      case SPACE:
                         {
-                           mconnect (mo, host, port);
+                           mconnect (&mo, host, port);
                            song = mpd_playlist_get_current_song (mo);
                            draw_text (conn,
                                       screen,
                                       win,
                                       10, HEIGHT - 10,
                                       song->file);
+                           xcb_flush (conn);
                            break;
                         }
                   }
