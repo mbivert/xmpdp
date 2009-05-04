@@ -53,9 +53,14 @@ typedef struct {
 } xmpd_t;
 
 /*
- * Connect to mpd.
+ * Init the xmpd_t structure.
  */
-static void mconnect (xmpd_t *);
+static void xmpd_init (xmpd_t *);
+
+/*
+ * Connect to mpd, beeing verbose or not.
+ */
+static void mconnect (xmpd_t *, bool);
 
 /*
  * Connect to X server via xcb.
@@ -88,8 +93,31 @@ static void *update_text (void *);
  */
 static void mdisconnect (xmpd_t *);
 
+/*
+ * Unmap and remap the screen to update.
+ */
+static void update_screen (xmpd_t *);
+
 static void
-mconnect (xmpd_t *xmpd) {
+xmpd_init (xmpd_t *xmpd) {
+   xmpd->conn = NULL;
+   xmpd->screen = NULL;
+   xmpd->setup = NULL;
+   xmpd->mo = NULL;
+   xmpd->host = DEF_HOST;
+   xmpd->port = DEF_PORT;
+   xmpd->x = 0;
+   xmpd->y = 0;
+   xmpd->x1 = 10;
+   xmpd->y1 = 10;
+   xmpd->h = H;
+   xmpd->w = W;
+   xmpd->border = 10;
+   xmpd->mask = XCB_GC_FOREGROUND | XCB_GC_GRAPHICS_EXPOSURES;
+}
+
+static void
+mconnect (xmpd_t *xmpd, bool b) {
    assert (xmpd != NULL);
    xmpd->mo = mpd_new (xmpd->host, xmpd->port, NULL);
    if (mpd_connect (xmpd->mo) != MPD_OK) {
@@ -98,7 +126,8 @@ mconnect (xmpd_t *xmpd) {
             xmpd->host, xmpd->port);
       exit (EXIT_FAILURE);
    }
-   printf ("Connected to mpd on %s:%d.\n", xmpd->host, xmpd->port);
+   if (b)
+      printf ("Connected to mpd on %s:%d.\n", xmpd->host, xmpd->port);
 }
 
 static void
@@ -213,25 +242,22 @@ draw_text (xmpd_t *xmpd, const char *s) {
 
 static void *
 update_text (void *xmpd) {
+   mdisconnect (xmpd);
    while (true) {
-      xmpd_t *x = (xmpd_t *) xmpd;
-      MpdObj *mo = x->mo;
-      mconnect (x);
-      printf ("%s\n", mpd_playlist_get_current_song (mo)->file);
-#if 0
-      mpd_Song *song = xmalloc (sizeof *song);
       char *label = NULL;
-      mconnect (x);
-      song = mpd_playlist_get_current_song (mo);
-      printf ("%s\n", song->file);
+      xmpd_t *x = (xmpd_t *) xmpd;
+      mpd_Song *song = xmalloc (sizeof *song);
 
+      update_screen (x);
+      mconnect (x, false);
+      song = mpd_playlist_get_current_song (x->mo);
       label = xmalloc (strlen (song->file) + 1);
       strcpy (label, song->file);
-      draw_text (xmpd, label);
-      XFREE (label);
-      /* Don't forget to close connexion */
-#endif
+
+      draw_text (x, label);
       mdisconnect (x);
+      XFREE (label);
+      xcb_flush (x->conn);
       sleep (DEF_UP_TIME);
    }
    return NULL;
@@ -243,29 +269,25 @@ mdisconnect (xmpd_t *xmpd) {
    mpd_free (xmpd->mo);
 }
 
+static void
+update_screen (xmpd_t *xmpd) {
+   xcb_void_cookie_t c;
+   /*c = xcb_unmap_window (xmpd->conn, xmpd->win);*/
+   /*test_cookie (c, xmpd, "Can't update screen");*/
+   c = xcb_map_window (xmpd->conn, xmpd->win);
+}
+
 int
 main (void) {
    /* Thread to update content of text field */
    pthread_t t_update;
    /* "Meta" structure */
    xmpd_t *xmpd = xmalloc (sizeof *xmpd);
-   /* Set required variables to connect mpd, and just do it */
-   xmpd->mo   = NULL;
-   xmpd->host = DEF_HOST;
-   xmpd->port = DEF_PORT;
-   mconnect (xmpd);
-   /* Now, take care of XCB */
-   xmpd->x      =  0;
-   xmpd->y      =  0;
-   xmpd->x1     = 10;
-   xmpd->y1     = 10;
-   xmpd->h      =  H;
-   xmpd->w      =  W;
-   xmpd->border = 10;
-   xmpd->mask   = XCB_GC_FOREGROUND | XCB_GC_GRAPHICS_EXPOSURES;
+   xmpd_init (xmpd);
+   mconnect (xmpd, true);
    xconnect (xmpd);
 
-   pthread_create (&t_update, NULL, update_text, &xmpd);
+   pthread_create (&t_update, NULL, update_text, xmpd);
    pthread_join (t_update, NULL);
 
    return EXIT_SUCCESS;
