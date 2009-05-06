@@ -6,6 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <xcb/xcb.h>
+#include <xcb/xcb_atom.h>
 
 #include "xalloc.h"
 #include "bool.h"
@@ -16,6 +17,8 @@
 
 #define W 500
 #define H 100
+
+#define TITLE "Xmpdp"
 
 /* Default font name */
 #define DEF_FN "7x13"
@@ -94,7 +97,7 @@ static void *update_text (void *);
 static void mdisconnect (xmpd_t *);
 
 /*
- * Unmap and remap the screen to update.
+ * Draw a white rectangle on the screen.
  */
 static void update_screen (xmpd_t *);
 
@@ -162,13 +165,21 @@ xconnect (xmpd_t *xmpd) {
                                xmpd->win,
                                xmpd->screen->root,
                                xmpd->x, xmpd->y,
-                               xmpd->h, xmpd->w,
+                               xmpd->w, xmpd->h,
                                xmpd->border,
                                XCB_WINDOW_CLASS_INPUT_OUTPUT,
                                xmpd->screen->root_visual,
                                xmpd->mask, values);
    test_cookie (w_cook, xmpd, "Cannot create window");
-   m_cook = xcb_map_window (xmpd->conn, xmpd->win);
+   xcb_change_property (xmpd->conn,
+                        XCB_PROP_MODE_REPLACE,
+                        xmpd->win,
+                        WM_NAME,
+                        STRING,
+                        8,
+                        strlen (TITLE),
+                        TITLE);
+  m_cook = xcb_map_window (xmpd->conn, xmpd->win);
    test_cookie (m_cook, xmpd, "Cannot map window");
    if (xcb_flush (xmpd->conn) <= 0) {
       fprintf (stderr, "Error: Cannot flush.\n");
@@ -248,8 +259,8 @@ update_text (void *xmpd) {
       xmpd_t *x = (xmpd_t *) xmpd;
       mpd_Song *song = xmalloc (sizeof *song);
 
-      update_screen (x);
       mconnect (x, false);
+      update_screen (x);
       song = mpd_playlist_get_current_song (x->mo);
       label = xmalloc (strlen (song->file) + 1);
       strcpy (label, song->file);
@@ -271,10 +282,36 @@ mdisconnect (xmpd_t *xmpd) {
 
 static void
 update_screen (xmpd_t *xmpd) {
-   xcb_void_cookie_t c;
-   /*c = xcb_unmap_window (xmpd->conn, xmpd->win);*/
-   /*test_cookie (c, xmpd, "Can't update screen");*/
-   c = xcb_map_window (xmpd->conn, xmpd->win);
+   uint32_t values[2];
+   /* Needed to get windows size */
+   xcb_get_geometry_cookie_t g_cook;
+   xcb_get_geometry_reply_t *g = xmalloc (sizeof *g);
+   xcb_rectangle_t *rect = xmalloc (sizeof *rect);
+   xcb_gcontext_t fg;
+
+   g_cook = xcb_get_geometry (xmpd->conn, xmpd->win);
+   g = xcb_get_geometry_reply (xmpd->conn, g_cook, NULL);
+
+   /* Window has been closed */
+   if (g == NULL) {
+      mdisconnect (xmpd);
+      xcb_disconnect (xmpd->conn);
+      exit (0);
+   }
+
+   rect->x = 0; rect->y = 0;
+   rect->width = g->width; rect->height = g->height;
+
+   fg = xcb_generate_id (xmpd->conn);
+
+   xmpd->mask = XCB_GC_FOREGROUND | XCB_GC_GRAPHICS_EXPOSURES;
+
+   values[0] = xmpd->screen->white_pixel;
+   values[1] = 0;
+
+   xcb_create_gc (xmpd->conn, fg, xmpd->win, xmpd->mask, values);
+   xcb_poly_fill_rectangle (xmpd->conn, xmpd->win, fg, 1, rect);
+   XFREE (rect);
 }
 
 int
