@@ -67,8 +67,9 @@ static void mconnect (xmpd_t *, bool);
 
 /*
  * Connect to X server via xcb.
+ * Use the root window (or not) with the boolean.
  */
-static void xconnect (xmpd_t *);
+static void xconnect (xmpd_t *, bool);
 
 /*
  * Test the validity of a cookie.
@@ -134,7 +135,7 @@ mconnect (xmpd_t *xmpd, bool b) {
 }
 
 static void
-xconnect (xmpd_t *xmpd) {
+xconnect (xmpd_t *xmpd, bool own) {
    uint32_t values[2];
    int i;
    xcb_void_cookie_t w_cook;
@@ -155,31 +156,36 @@ xconnect (xmpd_t *xmpd) {
    if ((xmpd->screen = (xmpd->iter).data) == NULL)
      fail (xmpd, "Cannot open screen");
 
-   xmpd->win = xcb_generate_id (xmpd->conn);
-   xmpd->mask = XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK;
-   values[0] = xmpd->screen->white_pixel;
-   values[1] = XCB_EVENT_MASK_EXPOSURE;
-   /* Open the window */
-   w_cook = xcb_create_window (xmpd->conn,
-                               XCB_COPY_FROM_PARENT,
-                               xmpd->win,
-                               xmpd->screen->root,
-                               xmpd->x, xmpd->y,
-                               xmpd->w, xmpd->h,
-                               xmpd->border,
-                               XCB_WINDOW_CLASS_INPUT_OUTPUT,
-                               xmpd->screen->root_visual,
-                               xmpd->mask, values);
-   test_cookie (w_cook, xmpd, "Cannot create window");
-   xcb_change_property (xmpd->conn,
-                        XCB_PROP_MODE_REPLACE,
-                        xmpd->win,
-                        WM_NAME,
-                        STRING,
-                        8,
-                        strlen (TITLE),
-                        TITLE);
-  m_cook = xcb_map_window (xmpd->conn, xmpd->win);
+   if (!own)
+      xmpd->win = xmpd->screen->root;
+   else {
+      xmpd->win = xcb_generate_id (xmpd->conn);
+      xmpd->mask = XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK;
+      values[0] = xmpd->screen->black_pixel;
+      values[1] = XCB_EVENT_MASK_EXPOSURE;
+      /* Open the window */
+      w_cook = xcb_create_window (xmpd->conn,
+                                  XCB_COPY_FROM_PARENT,
+                                  xmpd->win,
+                                  xmpd->screen->root,
+                                  xmpd->x, xmpd->y,
+                                  xmpd->w, xmpd->h,
+                                  xmpd->border,
+                                  XCB_WINDOW_CLASS_INPUT_OUTPUT,
+                                  xmpd->screen->root_visual,
+                                  xmpd->mask, values);
+      test_cookie (w_cook, xmpd, "Cannot create window");
+      xcb_change_property (xmpd->conn,
+                           XCB_PROP_MODE_REPLACE,
+                           xmpd->win,
+                           WM_NAME,
+                           STRING,
+                           8,
+                           strlen (TITLE),
+                           TITLE);
+   }
+
+   m_cook = xcb_map_window (xmpd->conn, xmpd->win);
    test_cookie (m_cook, xmpd, "Cannot map window");
    if (xcb_flush (xmpd->conn) <= 0) {
       fprintf (stderr, "Error: Cannot flush.\n");
@@ -221,8 +227,8 @@ get_font_gc (xmpd_t *xmpd, const char *fn) {
    test_cookie (f_cook, xmpd, "Cannot open font");
    gc = xcb_generate_id (xmpd->conn);
    mask = XCB_GC_FOREGROUND | XCB_GC_BACKGROUND | XCB_GC_FONT;
-   values[0] = xmpd->screen->black_pixel;
-   values[1] = xmpd->screen->white_pixel;
+   values[0] = xmpd->screen->white_pixel;
+   values[1] = xmpd->screen->black_pixel;
    values[2] = font;
    gc_cook = xcb_create_gc_checked (xmpd->conn,
                                     gc,
@@ -306,7 +312,7 @@ update_screen (xmpd_t *xmpd) {
 
    xmpd->mask = XCB_GC_FOREGROUND | XCB_GC_GRAPHICS_EXPOSURES;
 
-   values[0] = xmpd->screen->white_pixel;
+   values[0] = xmpd->screen->black_pixel;
    values[1] = 0;
 
    xcb_create_gc (xmpd->conn, fg, xmpd->win, xmpd->mask, values);
@@ -322,7 +328,7 @@ main (void) {
    xmpd_t *xmpd = xmalloc (sizeof *xmpd);
    xmpd_init (xmpd);
    mconnect (xmpd, true);
-   xconnect (xmpd);
+   xconnect (xmpd, false);
 
    pthread_create (&t_update, NULL, update_text, xmpd);
    pthread_join (t_update, NULL);
