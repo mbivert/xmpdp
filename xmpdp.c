@@ -1,23 +1,30 @@
 #include <assert.h>
+#include <errno.h>
 #include <libmpd/libmpd.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <syslog.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 #include <xcb/xcb.h>
 #include <xcb/xcb_atom.h>
 
-#include "xalloc.h"
 #include "bool.h"
+#include "xalloc.h"
 
 /* Default mpd's location */
 #define DEF_HOST "127.0.0.1"
 #define DEF_PORT        6600
 
+/* Default size of the window */
 #define W 500
 #define H 100
 
+/* Frame title */
 #define TITLE "Xmpdp"
 
 /* Default font name */
@@ -26,12 +33,15 @@
 /* Default time to wait before each screen update */
 #define DEF_UP_TIME 1
 
+/* Where to log outputs */
+#define LOG "/tmp/xmpdp.run"
+
 
 /*
  * A structure to handle window and mpd variables
  */
 typedef struct {
-   /* XCB relatives variables */
+   /* Variables for XCB */
    xcb_connection_t           *conn;
    xcb_screen_t             *screen;
    const xcb_setup_t         *setup;
@@ -39,7 +49,7 @@ typedef struct {
    xcb_screen_iterator_t       iter;
    uint32_t                    mask;
    int                   screen_num;
-   /* The mpd object from which retrieve informations */
+   /* The mpd object from which we retrieve informations */
    MpdObj                       *mo;
    /* Size of the window */
    unsigned int                   h;
@@ -51,9 +61,26 @@ typedef struct {
    int                           x1;
    int                           y1;
    int                       border;
+   /* Where to retrieve informations for mpd */
    char                       *host;
    int                         port;
 } xmpd_t;
+
+
+/*
+ * Damonize the process.
+ */
+static void daemonize (void);
+
+/*
+ * Exit with an error message.
+ */
+static void faild (const char *);
+
+/*
+ * Handle signals.
+ */
+static void handle_sgn (int);
 
 /*
  * Init the xmpd_t structure.
@@ -89,7 +116,7 @@ static xcb_gc_t get_font_gc (xmpd_t *, const char *);
 
 static void draw_text (xmpd_t *, const char *);
 
-/* Must have this prototype because used in thread */
+/* Must return an take void * as argument because used in thread */
 static void *update_text (void *);
 
 /*
@@ -101,6 +128,55 @@ static void mdisconnect (xmpd_t *);
  * Draw a white rectangle on the screen.
  */
 static void update_screen (xmpd_t *);
+
+
+static void
+daemonize (void) {
+   pid_t pid;
+   if (getppid () == 1)
+      return;
+   pid = fork ();
+   if (pid < 0)
+      faild ("fork ()");
+   if (pid > 0)
+      exit (EXIT_SUCCESS);
+   umask (022);
+   if (setsid () < 0)
+      faild ("setsid ()");
+   if (chdir ("/") < 0)
+      faild ("chdir ()");
+
+   freopen ("/dev/null", "r", stdin);
+   freopen (LOG, "w", stdout);
+   freopen (LOG, "w", stderr);
+   fprintf (stderr, "Started with pid: %d.\n", getpid ());
+
+   signal (SIGHUP, handle_sgn);
+   signal (SIGTERM, handle_sgn);
+}
+
+static void
+faild (const char *s) {
+   syslog (LOG_ERR, "'%s' failed, errno = %d (%s).", s,
+         errno, strerror (errno));
+   exit (EXIT_FAILURE);
+}
+
+static void
+handle_sgn (int s) {
+   switch (s) {
+      case SIGHUP:
+         syslog (LOG_NOTICE, "SIGHUP signal received.");
+         break;
+      case SIGTERM:
+         syslog (LOG_NOTICE, "SIGTERM signal received.");
+         exit (EXIT_SUCCESS);
+         break;
+      default:
+         syslog (LOG_NOTICE, "Unknown signal %d received.", s);
+         break;
+   }
+}
 
 static void
 xmpd_init (xmpd_t *xmpd) {
@@ -260,7 +336,7 @@ draw_text (xmpd_t *xmpd, const char *s) {
 static void *
 update_text (void *xmpd) {
    mdisconnect (xmpd);
-   while (true) {
+   while (!sleep (DEF_UP_TIME)) {
       char *label = NULL;
       xmpd_t *x = (xmpd_t *) xmpd;
       mpd_Song *song = xmalloc (sizeof *song);
@@ -275,7 +351,6 @@ update_text (void *xmpd) {
       mdisconnect (x);
       XFREE (label);
       xcb_flush (x->conn);
-      sleep (DEF_UP_TIME);
    }
    return NULL;
 }
@@ -289,7 +364,7 @@ mdisconnect (xmpd_t *xmpd) {
 static void
 update_screen (xmpd_t *xmpd) {
    uint32_t values[2];
-   /* Needed to get windows size */
+   /* Needed to get window size */
    xcb_get_geometry_cookie_t g_cook;
    xcb_get_geometry_reply_t *g = xmalloc (sizeof *g);
    xcb_rectangle_t *rect = xmalloc (sizeof *rect);
@@ -302,6 +377,8 @@ update_screen (xmpd_t *xmpd) {
    if (g == NULL) {
       mdisconnect (xmpd);
       xcb_disconnect (xmpd->conn);
+      XFREE (g);
+      XFREE (rect);
       exit (0);
    }
 
@@ -317,8 +394,11 @@ update_screen (xmpd_t *xmpd) {
 
    xcb_create_gc (xmpd->conn, fg, xmpd->win, xmpd->mask, values);
    xcb_poly_fill_rectangle (xmpd->conn, xmpd->win, fg, 1, rect);
+
+   XFREE (g);
    XFREE (rect);
 }
+
 
 int
 main (void) {
@@ -326,7 +406,12 @@ main (void) {
    pthread_t t_update;
    /* "Meta" structure */
    xmpd_t *xmpd = xmalloc (sizeof *xmpd);
+
+   openlog ("xmpdp", LOG_PID, LOG_DAEMON);
+   daemonize ();
+
    xmpd_init (xmpd);
+
    mconnect (xmpd, true);
    xconnect (xmpd, false);
 
